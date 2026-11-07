@@ -1,18 +1,37 @@
 #include <Arduino.h>
+#ifdef ESP8266
+#include <ESP8266WiFi.h>
+#include <EEPROM.h>
+extern "C" {
+#include <user_interface.h>
+}
+#else
 #include <WiFi.h>
 #include "esp_wifi.h"
-#include <ctype.h>
-#include <string.h>
-#include <SPIFFS.h>
 #include <Preferences.h>
 #include <NimBLEDevice.h>   // BLE side of the signature union (Flock BLE adverts)
+#endif
+#include <ctype.h>
+#include <string.h>
+#ifdef ESP8266
+#include <FS.h>
+#else
+#include <SPIFFS.h>
+#endif
 #include "display_dongle.h"
 
 // ============================================================
 // CONFIG  (board defaults; override via platformio build_flags)
 // ============================================================
 
-#ifdef BOARD_LILYGO_T_DONGLE_S3
+#ifdef ESP8266
+// Wemos D1 mini (ESP8266): built-in LED is active-low on GPIO2.
+#define USE_BUZZER         0
+#define USE_LED            1
+#define LED_PIN            LED_BUILTIN
+#define LED_ACTIVE_HIGH    0
+#define MIRROR_SERIAL      0
+#elif defined(BOARD_LILYGO_T_DONGLE_S3)
 // LilyGO T-Dongle S3: ST7735 display + APA102 RGB (no buzzer).
 #define USE_BUZZER         0
 #define USE_LED            1
@@ -247,14 +266,20 @@ typedef struct {
 static volatile AlertEntry alertQueue[ALERT_QUEUE_SIZE];
 static volatile size_t alertHead = 0;  // written by callback
 static volatile size_t alertTail = 0;  // read by loop()
+#ifndef ESP8266
 static portMUX_TYPE    queueMux  = portMUX_INITIALIZER_UNLOCKED;
+#endif
 
 static void IRAM_ATTR enqueueAlert(AlertType type, const uint8_t* mac, int8_t rssi,
                                     uint8_t ch, const char* ssid, const char* kind) {
+#ifndef ESP8266
   portENTER_CRITICAL_ISR(&queueMux);
+#endif
   size_t next = (alertHead + 1) % ALERT_QUEUE_SIZE;
   if (next == alertTail) {                         // drop if full — loop() is behind
+#ifndef ESP8266
     portEXIT_CRITICAL_ISR(&queueMux);
+#endif
     return;
   }
 
@@ -271,7 +296,9 @@ static void IRAM_ATTR enqueueAlert(AlertType type, const uint8_t* mac, int8_t rs
   else        { ((char*)e->frameKind)[0] = '\0'; }
 
   alertHead = next;
+#ifndef ESP8266
   portEXIT_CRITICAL_ISR(&queueMux);
+#endif
 }
 
 // ============================================================
@@ -607,8 +634,20 @@ static bool shouldSuppressDuplicate(const char* macStr, uint8_t tier) {
 static void stopSniffing(const char* reason) {
   if (sniffingStopped) return;
   sniffingStopped = true;
+#ifdef ESP8266
+  wifi_promiscuous_enable(0);
+#else
   esp_wifi_set_promiscuous(false);
+#endif
   dualPrintf("[flockyou] sniffing stopped: %s\n", reason);
+}
+
+static void setWifiChannel(uint8_t channel) {
+#ifdef ESP8266
+  wifi_set_channel(channel);
+#else
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+#endif
 }
 
 static void applyInitialChannel() {
@@ -619,7 +658,7 @@ static void applyInitialChannel() {
 #else
   currentChannel = fullHopChannels[0];
 #endif
-  esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
+  setWifiChannel(currentChannel);
   lastHop = millis();  // start dwell timer precisely when channel is first set
 }
 
@@ -628,7 +667,7 @@ static void updateChannelMode() {
 #if CHANNEL_MODE == CHANNEL_MODE_SINGLE
   if (currentChannel != SINGLE_CHANNEL) {
     currentChannel = SINGLE_CHANNEL;
-    esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
+    setWifiChannel(currentChannel);
   }
   return;
 #else
@@ -640,7 +679,7 @@ static void updateChannelMode() {
     fullHopIndex = (fullHopIndex + 1) % fullHopChannelCount;
     currentChannel = fullHopChannels[fullHopIndex];
   #endif
-  esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
+  setWifiChannel(currentChannel);
   lastHop = millis();
 #endif
 }
@@ -1036,9 +1075,13 @@ static void emitDetectionJSON(const char* proto, const char* mac, const char* me
 // Parsed with substring + sscanf rather than a JSON library: the grammar is
 // three fixed shapes and pulling in ArduinoJson for it isn't worth the flash.
 
+#ifndef ESP8266
 static Preferences fyPrefs;
 static const char* FY_NVS_NS   = "flockyou";
 static const char* FY_NVS_BEEP = "beepmask";
+#else
+static bool fyEepromReady = false;
+#endif
 
 #define CMD_BUF_LEN 128
 static char   cmdBuf[CMD_BUF_LEN];
@@ -1057,21 +1100,41 @@ static const char* tierLabel(uint8_t tier) {
 }
 
 static void fyLoadBeepMask() {
+#ifdef ESP8266
+  if (!fyEepromReady) {
+    fyBeepMask = BEEP_MASK_DEFAULT;
+    return;
+  }
+  uint8_t storedMask = EEPROM.read(0);
+  fyBeepMask = (storedMask <= 0x1F) ? storedMask : BEEP_MASK_DEFAULT;
+#else
   if (!fyPrefs.begin(FY_NVS_NS, /*readOnly=*/true)) {
     fyBeepMask = BEEP_MASK_DEFAULT;
     return;
   }
   fyBeepMask = fyPrefs.getUChar(FY_NVS_BEEP, BEEP_MASK_DEFAULT);
   fyPrefs.end();
+#endif
 }
 
 static void fySaveBeepMask() {
+#ifdef ESP8266
+  if (!fyEepromReady) {
+    dualPrintln("[flockyou] EEPROM unavailable — beep mask not persisted");
+    return;
+  }
+  EEPROM.write(0, (uint8_t)fyBeepMask);
+  if (!EEPROM.commit()) {
+    dualPrintln("[flockyou] EEPROM commit failed — beep mask not persisted");
+  }
+#else
   if (!fyPrefs.begin(FY_NVS_NS, /*readOnly=*/false)) {
     dualPrintln("[flockyou] NVS open failed — beep mask not persisted");
     return;
   }
   fyPrefs.putUChar(FY_NVS_BEEP, (uint8_t)fyBeepMask);
   fyPrefs.end();
+#endif
 }
 
 // ------------------------------------------------------------
@@ -1496,27 +1559,23 @@ static bool IRAM_ATTR fyProbeBodyFlockIeSigPrimary(const uint8_t* body, int body
   return false;
 }
 
-static void IRAM_ATTR wifiSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
-  if (!buf || sniffingStopped) return;
-
+static void IRAM_ATTR processWifiFrame(const uint8_t* payload, int sigLen,
+                                       int8_t rssi, uint8_t ch, uint8_t type) {
+  if (!payload || sniffingStopped) return;
 #if PROCESS_MGMT_FRAMES && PROCESS_DATA_FRAMES
-  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
+  if (type != 0 && type != 2) return;
 #elif PROCESS_MGMT_FRAMES
-  if (type != WIFI_PKT_MGMT) return;
+  if (type != 0) return;
 #elif PROCESS_DATA_FRAMES
-  if (type != WIFI_PKT_DATA) return;
+  if (type != 2) return;
 #else
   return;  // nothing configured to process
 #endif
 
-  wifi_promiscuous_pkt_t*      pkt = (wifi_promiscuous_pkt_t*)buf;
-  if (pkt->rx_ctrl.sig_len < sizeof(wifi_ieee80211_mac_hdr_t)) return;
-  wifi_ieee80211_mac_hdr_t*    hdr = (wifi_ieee80211_mac_hdr_t*)pkt->payload;
-  int8_t rssi = pkt->rx_ctrl.rssi;
+  if (sigLen < (int)sizeof(wifi_ieee80211_mac_hdr_t)) return;
+  wifi_ieee80211_mac_hdr_t* hdr = (wifi_ieee80211_mac_hdr_t*)payload;
 
   if (rssi < RSSI_MIN) return;
-
-  uint8_t ch = (uint8_t)pkt->rx_ctrl.channel;  // actual rx channel from driver
 
   // --- OUI check: addr2 (transmitter/source) ---
   //
@@ -1531,14 +1590,13 @@ static void IRAM_ATTR wifiSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (matchOuiRaw(hdr->addr2)) {
     bool fingerprinted = false;
 
-    if (type == WIFI_PKT_MGMT) {
+    if (type == 0) {
       uint8_t fc0     = hdr->frame_ctrl & 0xFF;
       uint8_t ftype   = (fc0 >> 2) & 0x03;
       uint8_t subtype = (fc0 >> 4) & 0x0F;
       if (ftype == 0 && subtype == 4) {                        // Probe Request
-        int sigLen  = (int)pkt->rx_ctrl.sig_len;
         int bodyLen = sigLen - (int)sizeof(wifi_ieee80211_mac_hdr_t);
-        const uint8_t* body = pkt->payload + sizeof(wifi_ieee80211_mac_hdr_t);
+        const uint8_t* body = payload + sizeof(wifi_ieee80211_mac_hdr_t);
         int r = (bodyLen > 0) ? isWildcardProbeIE(body, bodyLen) : -1;
         // FCS-trailer retry: only when the first parse found no SSID IE AT
         // ALL (-1). A found-but-nonzero (0) means legit directed probe; do
@@ -1598,20 +1656,20 @@ static void IRAM_ATTR wifiSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
   // OUI in addr3 when addr2 is randomised. No probe/IE behavioural check, so
   // it shares tier 1 with addr1 and the same false-positive caveat.
 #if CHECK_ADDR3
-  if (type == WIFI_PKT_MGMT && matchOuiRaw(hdr->addr3)) {
+  if (type == 0 && matchOuiRaw(hdr->addr3)) {
     enqueueAlert(ALERT_OUI_ADDR3, hdr->addr3, rssi, ch, nullptr, "addr3");
   }
 #endif
 
 #if ENABLE_SSID_MATCH
-  if (type == WIFI_PKT_MGMT) {
+  if (type == 0) {
     uint8_t fc0     = hdr->frame_ctrl & 0xFF;
     uint8_t subtype = (fc0 >> 4) & 0x0F;
     uint8_t ftype   = (fc0 >> 2) & 0x03;
 
     if (ftype == 0) {
-      int sigLen = pkt->rx_ctrl.sig_len - 4;  // strip 4-byte FCS
-      if (sigLen < (int)sizeof(wifi_ieee80211_mac_hdr_t)) return;
+      int bodySigLen = sigLen - 4;  // strip 4-byte FCS
+      if (bodySigLen < (int)sizeof(wifi_ieee80211_mac_hdr_t)) return;
 
       const uint8_t* mgmtBody    = nullptr;
       int            mgmtBodyLen = 0;
@@ -1620,18 +1678,18 @@ static void IRAM_ATTR wifiSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
       if (subtype == 8 || subtype == 5) {
         // Beacon / Probe Response: fixed params = 12 bytes after MAC hdr
         int off = sizeof(wifi_ieee80211_mac_hdr_t) + 12;
-        if (sigLen > off) {
+        if (bodySigLen > off) {
           frameKind   = (subtype == 8) ? "beacon" : "probe_resp";
-          mgmtBody    = pkt->payload + off;
-          mgmtBodyLen = sigLen - off;
+          mgmtBody    = payload + off;
+          mgmtBodyLen = bodySigLen - off;
         }
       } else if (subtype == 4) {
         // Probe Request: IEs follow directly after MAC hdr
         int off = sizeof(wifi_ieee80211_mac_hdr_t);
-        if (sigLen > off) {
+        if (bodySigLen > off) {
           frameKind   = "probe_req";
-          mgmtBody    = pkt->payload + off;
-          mgmtBodyLen = sigLen - off;
+          mgmtBody    = payload + off;
+          mgmtBodyLen = bodySigLen - off;
         }
       }
 
@@ -1648,18 +1706,93 @@ static void IRAM_ATTR wifiSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
 #endif
 }
 
+#ifdef ESP8266
+struct FYEsp8266RxControl {
+  signed rssi:8;
+  unsigned rate:4;
+  unsigned is_group:1;
+  unsigned:1;
+  unsigned sig_mode:2;
+  unsigned legacy_length:12;
+  unsigned damatch0:1;
+  unsigned damatch1:1;
+  unsigned bssidmatch0:1;
+  unsigned bssidmatch1:1;
+  unsigned MCS:7;
+  unsigned CWB:1;
+  unsigned HT_length:16;
+  unsigned Smoothing:1;
+  unsigned Not_Sounding:1;
+  unsigned:1;
+  unsigned Aggregation:1;
+  unsigned STBC:2;
+  unsigned FEC_CODING:1;
+  unsigned SGI:1;
+  unsigned rxend_state:8;
+  unsigned ampdu_cnt:8;
+  unsigned channel:4;
+  unsigned:12;
+};
+
+struct FYEsp8266SnifferPacket {
+  FYEsp8266RxControl rx_ctrl;
+  uint8_t payload[112];
+  uint16_t count;
+  uint16_t len;
+} __attribute__((packed));
+static_assert(sizeof(FYEsp8266RxControl) == 12, "Unexpected ESP8266 RX-control layout");
+
+static void IRAM_ATTR wifiSniffer8266(uint8_t* buf, uint16_t len) {
+  if (!buf || sniffingStopped || len < sizeof(FYEsp8266SnifferPacket)) return;
+  FYEsp8266SnifferPacket* packet = (FYEsp8266SnifferPacket*)buf;
+  int sigLen = packet->len;
+  if (sigLen > (int)sizeof(packet->payload)) sigLen = sizeof(packet->payload);
+  if (sigLen < (int)sizeof(wifi_ieee80211_mac_hdr_t)) return;
+  const uint8_t* frame = packet->payload;
+  uint8_t frameType = (frame[0] >> 2) & 0x03;
+  processWifiFrame(frame, sigLen, (int8_t)packet->rx_ctrl.rssi,
+                   (uint8_t)packet->rx_ctrl.channel, frameType);
+}
+#else
+static void IRAM_ATTR wifiSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!buf || sniffingStopped) return;
+#if PROCESS_MGMT_FRAMES && PROCESS_DATA_FRAMES
+  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
+#elif PROCESS_MGMT_FRAMES
+  if (type != WIFI_PKT_MGMT) return;
+#elif PROCESS_DATA_FRAMES
+  if (type != WIFI_PKT_DATA) return;
+#else
+  return;
+#endif
+  wifi_promiscuous_pkt_t* packet = (wifi_promiscuous_pkt_t*)buf;
+  processWifiFrame(packet->payload, packet->rx_ctrl.sig_len,
+                   packet->rx_ctrl.rssi, (uint8_t)packet->rx_ctrl.channel,
+                   type == WIFI_PKT_MGMT ? 0 : 2);
+}
+#endif
+
 // ============================================================
 // DRAIN QUEUE — called from loop(), safe to Serial.print here
 // ============================================================
 
 static void drainAlertQueue() {
   while (true) {
+#ifndef ESP8266
     portENTER_CRITICAL(&queueMux);
-    if (alertTail == alertHead) { portEXIT_CRITICAL(&queueMux); break; }
+#endif
+    if (alertTail == alertHead) {
+#ifndef ESP8266
+      portEXIT_CRITICAL(&queueMux);
+#endif
+      break;
+    }
     AlertEntry e;
     memcpy(&e, (const void*)&alertQueue[alertTail], sizeof(AlertEntry));
     alertTail = (alertTail + 1) % ALERT_QUEUE_SIZE;
+#ifndef ESP8266
     portEXIT_CRITICAL(&queueMux);
+#endif
 
     char macStr[18];
     macToStr(e.mac, macStr, sizeof(macStr));
@@ -1789,6 +1922,7 @@ static void heartbeatTick() {
 // keeps ~90% of the airtime. Flock adverts repeat continuously, so a low
 // duty cycle still catches them within seconds.
 
+#ifndef ESP8266
 #define FY_BLE_SCAN_WINDOW_MS    30
 #define FY_BLE_SCAN_INTERVAL_MS  300
 #define FY_BLE_MFG_XUNTONG       0x09C8
@@ -1887,6 +2021,7 @@ static void fyBleStart() {
   dualPrintf("[flockyou] BLE scan started (win=%ums int=%ums)\n",
              (unsigned)FY_BLE_SCAN_WINDOW_MS, (unsigned)FY_BLE_SCAN_INTERVAL_MS);
 }
+#endif
 
 // ============================================================
 // SETUP / LOOP
@@ -1894,16 +2029,18 @@ static void fyBleStart() {
 
 void setup() {
   Serial.begin(115200);
+#ifndef ESP8266
   // Crucial for USB-optional operation: without this, Serial.write() will
   // block indefinitely on an ESP32-S3 USB-CDC port when no host is attached.
   Serial.setTxTimeoutMs(0);
+#endif
   delay(300);
 
 #ifdef BOARD_LILYGO_T_DONGLE_S3
   dongleDisplayInit();
 #endif
 
-#if MIRROR_SERIAL
+#if MIRROR_SERIAL && !defined(ESP8266)
   Serial1.begin(MIRROR_BAUD, SERIAL_8N1, -1, MIRROR_TX_PIN);  // TX-only on GPIO43
 #endif
 
@@ -1930,10 +2067,19 @@ void setup() {
   memset(dedupeTable, 0, sizeof(dedupeTable));
 
   // Restore the per-tier beep mask chosen from the dashboard last session.
+#ifdef ESP8266
+  EEPROM.begin(4);
+  fyEepromReady = true;
+#endif
   fyLoadBeepMask();
 
   // SPIFFS — format on first boot if missing. Non-fatal if it fails.
-  if (SPIFFS.begin(true)) {
+#ifdef ESP8266
+  bool spiffsMounted = SPIFFS.begin();
+#else
+  bool spiffsMounted = SPIFFS.begin(true);
+#endif
+  if (spiffsMounted) {
     fySpiffsReady = true;
     dualPrintln("[flockyou] SPIFFS ready");
     fyPromotePrevSession();
@@ -1941,15 +2087,25 @@ void setup() {
     dualPrintln("[flockyou] SPIFFS init FAILED — running without persistence");
   }
 
+#ifdef ESP8266
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  wifi_promiscuous_enable(0);
+#else
   WiFi.mode(WIFI_MODE_NULL);
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   esp_wifi_init(&cfg);
   esp_wifi_set_storage(WIFI_STORAGE_RAM);
   esp_wifi_set_mode(WIFI_MODE_NULL);
   esp_wifi_start();
+#endif
 
   applyInitialChannel();
 
+#ifdef ESP8266
+  wifi_set_promiscuous_rx_cb(&wifiSniffer8266);
+  wifi_promiscuous_enable(1);
+#else
   wifi_promiscuous_filter_t filt = {
     .filter_mask = 0
 #if PROCESS_MGMT_FRAMES
@@ -1966,8 +2122,13 @@ void setup() {
   // BLE side of the union — passive NimBLE scan sharing the radio with
   // promiscuous WiFi RX (low duty cycle; see the BLE section above).
   fyBleStart();
+#endif
 
+#ifdef ESP8266
+  dualPrintln("[flockyou] ESP8266 WiFi detector started (BLE unavailable)");
+#else
   dualPrintln("[flockyou] merged WiFi detector started");
+#endif
   dualPrintf("[flockyou] mode=%s dwell_ms=%u start_channel=%u rssi_min=%d spiffs=%d\n",
                 channelModeName(), CHANNEL_DWELL_MS, currentChannel,
                 RSSI_MIN, fySpiffsReady ? 1 : 0);

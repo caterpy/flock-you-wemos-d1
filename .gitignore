@@ -1,5 +1,7 @@
 
 .pio/
+.venv/
+api/.venv/
 
 .vscode/
 

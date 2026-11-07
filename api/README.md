@@ -8,7 +8,7 @@ A Flask-based web dashboard for real-time monitoring and analysis of Flock Safet
 - **Live Updates**: Real-time detection display via WebSocket
 - **Detection Filtering**: Filter by detection method / confidence tier (IE fingerprint, wildcard probe, OUI transmitter, OUI receiver, OUI BSSID, SSID keyword)
 - **Confidence Tiers**: Each detection is tagged with the method that caught it and a tier 0–4; the badge shows the strongest evidence, and an "also" row lists every other path that caught the same device with hit counts
-- **Per-Tier Audio**: Mute or unmute each tier's buzzer tone on the device from the **Audio** panel; the setting persists on-device in NVS
+- **Per-Tier Audio**: Mute or unmute each tier's buzzer tone on the device from the **Audio** panel; the setting persists on-device in ESP32 NVS or ESP8266 EEPROM emulation
 - **Statistics Dashboard**: Session and cumulative counts, including IE-confirmed devices
 - **Detailed View**: Complete device information for each detection
 
@@ -36,12 +36,12 @@ Both detection lists live in `api/data/` as pickles. `cumulative_detections.pkl`
 ### Setup
 1. **Install dependencies**:
    ```bash
-   pip install -r requirements.txt
+   python3 -m pip install -r requirements.txt
    ```
 
 2. **Run the application**:
    ```bash
-   python app.py
+   python3 flockyou.py
    ```
 
 3. **Access the dashboard**:
@@ -51,10 +51,14 @@ Both detection lists live in `api/data/` as pickles. `cumulative_detections.pkl`
 
 ### Basic Operation
 1. **Start the web server** using the command above
-2. **Connect your Flock You device** and ensure it's sending JSON data
-3. **View detections** in real-time on the dashboard
-4. **Filter detections** using the dropdown menu
-5. **Export data** using the export buttons
+2. Connect the Wemos D1 mini to the computer over USB
+3. In the dashboard, select its serial port (for example, `/dev/ttyUSB0` on Linux or `COM5` on Windows) under **Sniffer** and click **Connect**
+4. **View detections** in real-time on the dashboard; each newly detected signature appears in a green alert and in the live detections list
+5. **Filter detections** using the dropdown menu
+6. **Export data** using the export buttons
+
+For a Linux Wemos D1 mini installation that also builds and flashes the firmware,
+see the [Linux deployment instructions](../README.md#linux-install-flash-and-run-the-dashboard).
 
 ### GPS Setup
 The GPS header row has a **source** dropdown with two options:

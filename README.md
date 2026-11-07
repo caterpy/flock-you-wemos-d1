@@ -2,7 +2,33 @@
 
 <img src="flock.png" alt="Flock You" width="300px">
 
-**Passive 2.4 GHz promiscuous-mode detector for Flock Cam surveillance infrastructure. Runs standalone or feeds the Flask dashboard over USB for live GPS-tagged wardriving.**
+Edited flock you for Wemos D1 mini (ESP8266) boards, standalone / dashboard over USB for live GPS-tagged wardriving.**
+
+## Quick start: Wemos D1 mini / ESP8266MOD
+
+The Wemos scans by itself; for live logs and green detection alerts, plug it
+into a computer running this project's Flask dashboard. The board keeps
+channel-hopping while connected—the dashboard reads detections over USB serial.
+It does not host a Wi-Fi web page.
+
+On Debian/Ubuntu Linux, connect the Wemos with a data-capable USB cable and run
+these commands from a terminal:
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv
+git clone https://github.com/caterpy/flock-you-wemos-d1.git
+cd flock-you-wemos-d1
+chmod +x install_linux.sh
+./install_linux.sh --device-port /dev/ttyUSB0
+```
+
+Use the port listed by `ls /dev/serial/by-id/` if your board appears there;
+otherwise CH340-based ESP8266MOD boards commonly use `/dev/ttyUSB0`. The
+installer sets up the dashboard and PlatformIO, builds and flashes the Wemos,
+then starts the dashboard. Open `http://localhost:5000`, select the Wemos port
+under **Sniffer**, and click **Connect**. See [Linux setup](#linux-install-flash-and-run-the-dashboard)
+for permissions, options, and Windows instructions.
 
 
 > **For research & educational use only.** You assume all liability for any use or misuse of these devices — don't do anything illegal or dumb. This project is not affiliated with, endorsed by, or associated with any camera-network operator; all trademarks belong to their respective owners.
@@ -15,7 +41,7 @@ This is the `main` branch. It runs a **union signature set** combining two prove
 - QCA9377 broadcast probe requests at ~125 ms intervals, channel-hopping (LOWI geolocation scanning)
 - SSID patterns `Flock-XXXXXX` (SoftAP, WPA2 password `security`) and bare `Flock`
 
-**BLE (firmware-derived, passive NimBLE scan in-firmware):**
+**BLE (ESP32-S3 only; firmware-derived, passive NimBLE scan):**
 - Penguin battery-pack ads: name `Penguin-NNNNNNNNNN`, a bare 10-digit number, `FS Ext Battery`, or `DfuTarg`; manufacturer data company ID `0x09C8` (XUNTONG)
 - Flock accessory GATT service `e8ccbb38-9532-46a8-9fe5-1814df172e6f`; Nordic DFU `00001530-1212-efde-1523-785feabcd123`
 - Raven camera GATT services `0x3100`–`0x3500` (unauthenticated; `0x3101`/`0x3102` leak GPS)
@@ -38,13 +64,14 @@ Pintor, Lucia & Atzori, Luigi. (2022). Analysis of Wi-Fi Probe Requests Towards 
 
 ## What this branch does
 
-Turns a Seeed XIAO ESP32-S3 into a passive WiFi receiver that watches 2.4 GHz management and data frames for Flock Cam MAC OUIs. No AP, no transmit — the radio stays dedicated to sniffing while the device hops channels 11 / 6 / 1 (descending) at 250 ms dwell.
+Runs as a passive WiFi receiver on a Seeed XIAO ESP32-S3 or Wemos D1 mini (ESP8266), watching 2.4 GHz management and data frames for the target MAC OUIs. ESP32-S3 also performs the BLE scan; the ESP8266 has WiFi detection only. The radio does not connect to an AP or transmit and hops channels 11 / 6 / 1 (descending) at 250 ms dwell.
 
-Every detection is:
-
-- beeped (piezo on GPIO3) and flashed (onboard LED on GPIO21)
-- written to on-device SPIFFS in an CRC-validated persistence, previous session preserved
-- emitted as one JSON line over USB CDC in the schema `api/flockyou.py` expects, so the Flask dashboard auto-ingests it with GPS temporal matching
+Every detection is flashed on the board's LED, stored in SPIFFS with CRC-validated
+persistence (the previous session is preserved), and emitted over USB serial in
+the JSON schema `api/flockyou.py` expects. The XIAO ESP32-S3 also beeps on its
+GPIO3 piezo; the Wemos D1 mini uses its active-low onboard LED on GPIO2/D4 and
+has no buzzer by default. The Flask dashboard can add GPS by matching detections
+with a GPS receiver connected to the host computer.
 
 The device works standalone (no USB host needed) and plugged in (live dashboard) without any mode switch.
 
@@ -100,7 +127,7 @@ The tier does two jobs beyond the sound. It decides which label sticks when seve
 
 The dashboard badges each device with its best tier and lists the other paths that caught it underneath, with hit counts. Devices that only ever trip the broad paths and never fingerprint are the ones worth looking at.
 
-Audio per tier can be muted live from the dashboard's **Audio** panel; detection and logging are unaffected by the switches, and the setting persists in NVS across power cycles.
+Audio per tier can be muted live from the dashboard's **Audio** panel; detection and logging are unaffected by the switches. The setting persists in ESP32 NVS or ESP8266 EEPROM emulation across power cycles.
 
 
 ---
@@ -141,7 +168,7 @@ Audio per tier can be muted live from the dashboard's **Audio** panel; detection
        │
        ▼
   pollHostCommands()            ← loop(); dashboard sets the per-tier
-                                  beep mask, persisted to NVS
+                                  beep mask, persisted to NVS/EEPROM
 ```
 
 The split between callback and loop is deliberate: the WiFi task has hard real-time constraints and cannot call `Serial.print` or `malloc` safely. The callback writes only to the lock-free ring buffer; `loop()` does all the heavy work.
@@ -265,6 +292,25 @@ Open `http://localhost:5000`, pick your serial port from the UI, detections star
 
 ## Hardware
 
+### Wemos D1 mini / ESP8266MOD (`d1_mini`)
+
+The `d1_mini` environment builds the Wi-Fi detector for the ESP8266. It keeps the OUI, wildcard-probe/IE, serial dashboard, SPIFFS session, and channel-hopping functionality. The ESP8266 has no BLE radio, so BLE scanning is omitted on this target. The beep mask is persisted in EEPROM emulation instead of ESP32 NVS.
+
+| Pin | Function |
+|-----|----------|
+| GPIO 2 / D4 | Onboard LED (active low) |
+| USB serial | 115200 baud JSON and dashboard commands |
+
+No buzzer is enabled by default on the D1 mini; detection is indicated by the onboard LED and serial output. The radio remains in station mode with promiscuous reception enabled and does not connect to an access point.
+
+Build and flash:
+
+```bash
+pio run -e d1_mini
+pio run -e d1_mini -t upload
+pio device monitor -b 115200
+```
+
 ### Seeed XIAO ESP32-S3 (default: `xiao_esp32s3`)
 
 | Pin | Function |
@@ -289,7 +335,7 @@ Boot sound (XIAO only): first 6 notes of Super Mario Bros. World 1-2 (undergroun
 
 ### Detection audio
 
-Each tier has its own tone (see the table above), so the detection method is clear without looking at the screen. Individual tiers can be muted from the dashboard's **Audio** panel; muting affects the buzzer only, and detections still log and export. The mask lives in NVS under `flockyou/beepmask` and survives a power cycle.
+Each tier has its own tone (see the table above), so the detection method is clear without looking at the screen. Individual tiers can be muted from the dashboard's **Audio** panel; muting affects the buzzer only, and detections still log and export. The mask lives in ESP32 NVS or ESP8266 EEPROM emulation and survives a power cycle.
 
 The heartbeat uses the tone of the strongest tier currently in range, so muting a tier silences its heartbeat too.
 
@@ -299,13 +345,87 @@ The heartbeat uses the tone of the strongest tier currently in range, so muting 
 
 Requires [PlatformIO](https://platformio.org/).
 
+### Linux: install, flash, and run the dashboard
+
+The Quick start above is the recommended setup for Debian/Ubuntu. If the
+repository is already on the Linux computer, start at `chmod +x install_linux.sh`.
+Connect the Wemos using a data-capable USB cable and identify its serial port:
+
 ```bash
-pio run -e xiao_esp32s3              # build
-pio run -e xiao_esp32s3 -t upload    # flash
-pio device monitor
+ls -l /dev/serial/by-id/
+ls /dev/ttyUSB*
 ```
 
-`platformio.ini` and `partitions.csv` are at the root: 6 MB app, 1.94 MB SPIFFS, and a 20 KB `nvs` partition that holds the per-tier beep mask. XIAO needs no extra libraries.
+Run the installer from the repository root, replacing `/dev/ttyUSB0` with the
+port for your board:
+
+```bash
+chmod +x install_linux.sh
+./install_linux.sh --device-port /dev/ttyUSB0
+```
+
+This creates `api/.venv`, installs the dashboard requirements and PlatformIO,
+builds the `d1_mini` firmware, flashes it, and starts the dashboard. The first
+build downloads the ESP8266 toolchain and may take a few minutes. In the page at
+`http://localhost:5000`, select the same serial port under **Sniffer** and click
+**Connect**. Newly detected devices appear in the live list and as green alerts.
+
+If the firmware is already flashed, start only the dashboard and skip PlatformIO
+flashing with:
+
+```bash
+./install_linux.sh --no-flash
+```
+
+If Linux reports permission denied for the serial port, add your account to
+the serial-device group (usually `dialout` on Debian/Ubuntu), then log out and
+back in before rerunning:
+
+```bash
+sudo usermod -aG dialout "$USER"
+```
+
+To install the dashboard without flashing, use `./install_linux.sh --no-flash`.
+To install and flash without starting the dashboard, add `--no-run`. The
+dashboard binds to localhost by default; use `--host 0.0.0.0` only when you
+intentionally need access from other computers on your network. Binding to
+`0.0.0.0` exposes the dashboard to the local network; it has no login, so do
+not expose it to an untrusted network.
+
+### Windows: build, flash, and run the dashboard
+
+Install Python 3 and the Wemos USB-serial driver if Windows does not recognize
+the board. In PowerShell, from the repository root, build and flash (replace
+`COM5` if Windows assigned a different port):
+
+```powershell
+py -m pip install platformio
+py -m platformio run -e d1_mini -t upload --upload-port COM5
+py -m venv api\.venv
+api\.venv\Scripts\python.exe -m pip install -r api\requirements.txt
+Set-Location api
+.\.venv\Scripts\python.exe flockyou.py
+```
+
+Open `http://localhost:5000`, select the Wemos COM port under **Sniffer**, and
+click **Connect**. Close PlatformIO's Serial Monitor or any other serial
+terminal before connecting; only one program can use the USB serial port at a
+time.
+
+### Manual PlatformIO commands
+
+The installer uses PlatformIO's `d1_mini` environment for the ESP8266MOD:
+
+```bash
+pio run -e d1_mini
+pio run -e d1_mini -t upload --upload-port /dev/ttyUSB0
+pio device monitor -e d1_mini -b 115200
+```
+
+The XIAO ESP32-S3 target can also be built manually with
+`pio run -e xiao_esp32s3`; its partition table is in `partitions.csv`. The
+Wemos uses its default ESP8266 flash layout and EEPROM emulation for the beep
+mask.
 
 > **T-Dongle S3:** `platformio.ini` on this branch defines only `xiao_esp32s3`. The `display_dongle.cpp` source is present but excluded by `build_src_filter`, and there is no `lilygo_t_dongle_s3` env, so the T-Dongle cannot be built here yet. Tracked in [#50](https://github.com/colonelpanichacks/flock-you/issues/50) with a proposed env in [#48](https://github.com/colonelpanichacks/flock-you/pull/48).
 
@@ -321,7 +441,7 @@ pio device monitor
 | `ALERT_COOLDOWN_MS` | 5000 | Per-MAC serial-emit rate limit; a higher tier preempts it |
 | `CHECK_ADDR1` | 1 | Receiver-side OUI — @NitekryDPaul's addr1 technique (tier 1) |
 | `CHECK_ADDR3` | 1 | BSSID OUI fallback (tier 1) |
-| `BEEP_MASK_DEFAULT` | `0x1F` | Bit N = tier N audible. All five on; overridden by NVS once the dashboard sets it |
+| `BEEP_MASK_DEFAULT` | `0x1F` | Bit N = tier N audible. All five on; overridden by saved NVS/EEPROM value once the dashboard sets it |
 | `ENABLE_SSID_MATCH` | 0 | Substring match against `target_ssid_keywords[]` |
 | `PROCESS_MGMT_FRAMES` | 1 | Beacons, probe req/resp, etc. |
 | `PROCESS_DATA_FRAMES` | 1 | Data frames (where addr1 catch shines) |
@@ -334,9 +454,9 @@ pio device monitor
 
 ## Standalone vs connected
 
-**Without USB:** device boots, plays the SMB 1-2 intro, starts scanning, stores every unique detection to SPIFFS, flashes the onboard LED on each hit. Plug in later — the prior session is sitting in `/prev_session.json`.
+**Without USB:** device boots and starts scanning, stores every unique detection to SPIFFS, and flashes the onboard LED on each hit. The XIAO also plays the SMB 1-2 intro. Plug in later — the prior session is sitting in `/prev_session.json`.
 
-**With USB + Flask running:** same thing, plus every detection streams live to the dashboard as a JSON line. Flask adds GPS (if configured) and deduplicates across MAC, building the wardriving map as you move.
+**With USB + Flask running:** same thing, plus every detection streams live to the dashboard as a JSON line. Flask adds GPS (if configured) and deduplicates across MAC, building the wardriving map as you move. On Windows, start the dashboard from the `api` folder with `py -m pip install -r requirements.txt` (once) and `py flockyou.py`, then open `http://localhost:5000` and connect the Wemos serial port (for example, COM5). The dashboard shows live logs and raises a green alert when a new signature is detected; the device keeps channel-hopping as usual.
 
 Both modes work simultaneously — the SPIFFS write path doesn't care if a host is listening.
 
@@ -346,7 +466,7 @@ Both modes work simultaneously — the SPIFFS write path doesn't care if a host 
 
 ## Scope
 
-**WiFi + BLE firmware** (`main.cpp`): both radios passive. WiFi promiscuous sniffing gets ~90% of airtime; NimBLE passive scan runs at 10% duty (30 ms window / 300 ms interval). WiFi detections emit `protocol: wifi_2_4ghz`; BLE detections emit `protocol: ble` with the advertised `device_name` filled in.
+**Firmware** (`main.cpp`): the ESP32-S3 build passively scans WiFi and BLE (NimBLE at 10% duty: 30 ms window / 300 ms interval). The Wemos D1 mini/ESP8266 build passively scans WiFi only; that chip has no BLE radio. WiFi detections emit `protocol: wifi_2_4ghz`; ESP32 BLE detections emit `protocol: ble` with the advertised `device_name` filled in.
 
 **Python BLE companion** (`api/flockyou_ble.py`): a Flask blueprint that bridges a *second* serial device — an ESP32 running [oui-spy-unified-blue](https://github.com/colonelpanichacks/oui-spy-unified-blue) Mode 1 (BLE Detector) — into the same detection list, over a line-oriented `CMD:` protocol (`CMD:STATUS`, `CMD:DUMP_LIVE`, `CMD:DUMP_PREV`, `CMD:CLEAR_*`). It does **not** scan Bluetooth on the host: the only dependency it adds is `pyserial`, and the radio work happens on that device. What lives here is the signature reference used to label incoming records, including Classic BT corroboration (names `msm8953_32`/`Android`, SDP Device-ID Qualcomm `0x001D`/`0x1200`) that the on-device NimBLE scanner can't reach — those tags apply when a record arrives carrying the relevant fields. Matching records are tagged `firmware_sig: true` and `matched_signatures` in the API; the dashboard frontend does not render these fields yet (KML export also lacks them — CSV has full coverage).
 

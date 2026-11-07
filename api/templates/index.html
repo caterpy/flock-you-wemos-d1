@@ -561,6 +561,64 @@
             color: var(--warn);
         }
 
+        .detection-toast-region {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            z-index: 9999;
+            display: grid;
+            gap: 0.6rem;
+            width: min(24rem, calc(100vw - 2rem));
+            pointer-events: none;
+        }
+
+        .detection-toast {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 1rem;
+            border: 2px solid #4ade80;
+            border-radius: var(--radius-lg);
+            background: #14532d;
+            color: #f0fdf4;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+            pointer-events: auto;
+            animation: detection-toast-in 180ms ease-out;
+        }
+
+        .detection-toast strong {
+            display: block;
+            margin-bottom: 0.25rem;
+            color: #bbf7d0;
+        }
+
+        .detection-toast-details {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            overflow-wrap: anywhere;
+        }
+
+        .detection-toast-dismiss {
+            flex: 0 0 auto;
+            padding: 0 0.25rem;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            font-size: 1.25rem;
+            line-height: 1;
+            cursor: pointer;
+        }
+
+        @keyframes detection-toast-in {
+            from { opacity: 0; transform: translateY(-0.5rem); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .detection-toast { animation: none; }
+        }
+
         .oui-search-container {
             background: rgba(22, 29, 38, 0.8);
             border: 1px solid var(--accent);
@@ -2327,6 +2385,9 @@
 </head>
 <body>
 
+    <div class="detection-toast-region" id="detectionToastRegion"
+         aria-live="assertive" aria-atomic="false"></div>
+
     <div class="header">
         <div class="header-content">
             <div class="header-title">
@@ -3673,6 +3734,43 @@
             // Heartbeat acknowledged
         });
 
+        function showDetectionToast(detection) {
+            const region = document.getElementById('detectionToastRegion');
+            if (!region) return;
+
+            while (region.children.length >= 3) {
+                region.firstElementChild.remove();
+            }
+
+            const toast = document.createElement('div');
+            toast.className = 'detection-toast';
+            toast.setAttribute('role', 'alert');
+
+            const details = document.createElement('div');
+            const heading = document.createElement('strong');
+            heading.textContent = `FLOCK SIGNATURE DETECTED · T${detectionTier(detection)}`;
+            const summary = document.createElement('div');
+            summary.className = 'detection-toast-details';
+            summary.textContent = [
+                detection.mac_address || 'Unknown MAC',
+                methodLabel(detection.detection_method),
+                `Ch ${detection.channel ?? '?'}`,
+                `RSSI ${detection.rssi ?? '?'} dBm`
+            ].join(' · ');
+            details.append(heading, summary);
+
+            const dismiss = document.createElement('button');
+            dismiss.className = 'detection-toast-dismiss';
+            dismiss.type = 'button';
+            dismiss.setAttribute('aria-label', 'Dismiss detection alert');
+            dismiss.textContent = '×';
+            dismiss.addEventListener('click', () => toast.remove());
+
+            toast.append(details, dismiss);
+            region.appendChild(toast);
+            setTimeout(() => toast.remove(), 10000);
+        }
+
         // Socket.IO event handlers
         socket.on('new_detection', function(detection) {
             console.log('New detection received:', detection);
@@ -3689,6 +3787,7 @@
                 console.log('Detection already exists, updating:', detection.id);
                 detections[existingIndex] = detection;
             } else {
+                showDetectionToast(detection);
                 detections.unshift(detection);
             }
             
